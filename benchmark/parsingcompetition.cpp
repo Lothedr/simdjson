@@ -20,6 +20,7 @@ SIMDJSON_PUSH_DISABLE_ALL_WARNINGS
 #include "rapidjson/reader.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/writer.h"
+#include <BenchMJ.h>
 
 #include "sajson.h"
 
@@ -89,6 +90,62 @@ bool bench(const char *filename, bool verbose, bool just_data, double repeat_mul
     return false;
   }
 
+  size_t buffer_size = p.size() + 1;
+  char *buffer = (char *)malloc(buffer_size);
+  memcpy(buffer, p.data(), buffer_size - 1);
+  buffer[p.size()] = ' ';
+  std::vector<unsigned int> indices;
+  std::vector<char> stack;
+  auto it = buffer;
+  const auto end = it + buffer_size;
+  while (it < end) {
+    //will not work if one of [ ] { } will be inside string
+    while (it < end && !(*it == '[' || *it == ']' || *it == '{' || *it == '}'))
+      ++it;
+    if (it == end)
+      break;
+    if (stack.empty())
+      indices.push_back(it - buffer);
+    switch (*it) {
+    case '[':
+    case '{':
+      stack.push_back(*it);
+      break;
+    case ']': {
+      if (!stack.empty() && stack.back() == '[')
+        stack.pop_back();
+      else
+        exit(1);
+      break;
+    }
+    case '}': {
+      if (!stack.empty() && stack.back() == '{')
+        stack.pop_back();
+      else
+        exit(1);
+      break;
+    }
+    default:
+      exit(1);
+    }
+    ++it;
+  }
+  if (!stack.empty())
+    exit(1);
+
+  int repeat_gpu = static_cast<int>((50000000 * repeat_multiplier) / static_cast<double>(p.size()));
+  if (repeat_gpu < 10) { repeat_gpu = 10; }
+
+  std::string fixed;
+  if (indices.size() > 1) {
+    auto copyTo = buffer + indices[1] - 1;
+    while (copyTo > buffer && (*copyTo == '\r' || *copyTo == '\n' ||
+                               *copyTo == ' ' || *copyTo == '\t'))
+      --copyTo;
+    fixed = std::string(buffer, copyTo - buffer + 1);
+    p = simdjson::padded_string(fixed);
+  }
+
   int repeat = static_cast<int>((50000000 * repeat_multiplier) / static_cast<double>(p.size()));
   if (repeat < 10) { repeat = 10; }
   // Gigabyte: https://en.wikipedia.org/wiki/Gigabyte
@@ -128,12 +185,72 @@ bool bench(const char *filename, bool verbose, bool just_data, double repeat_mul
   simdjson::dom::parser parser;
   BEST_TIME("simdjson ", parser.parse(p).error(), simdjson::SUCCESS, , repeat, volume,
             !just_data);
+
+  // (static alloc stream)
+  {
+    std::vector<char> tmp_buffer(buffer_size * repeat_gpu);
+    auto copyTo = tmp_buffer.begin();
+    for (int i = 0; i < repeat_gpu; ++i)
+      copyTo = std::copy_n(buffer, buffer_size, copyTo);
+    auto njson = indices.size() * repeat_gpu;
+    BEST_TIME_STREAM("simdjson (stream)", tmp_buffer.data(), simdjson::SUCCESS, , njson, 10, buffer_size * repeat_gpu,
+      !just_data);
+  }
  
   rapidjson::Document d;
 
-  char *buffer = (char *)malloc(p.size() + 1);
-  memcpy(buffer, p.data(), p.size());
-  buffer[p.size()] = '\0';
+  //CUDA
+  do
+  {
+    const char *const endName = filename + strlen(filename);
+    const char *beg = endName - 1;
+    while (beg != filename && (*beg != '\\' && *beg != '/')) {
+      --beg;
+    }
+    if (beg != filename)
+		++beg;
+    double gb = static_cast<double>(buffer_size * repeat_gpu) / 1000000000.0;
+    auto result = RunWithConfig(beg, buffer, buffer_size, indices.data(), indices.size(), repeat_gpu);
+    switch (result.successful) {
+    case BenchResult::BenchErrorCode::gpu_error:
+      printf("MetaJson: Kernel failed!\n");
+      break;
+    case BenchResult::BenchErrorCode::consistency_error:
+      printf("MetaJson: No consistency in results!\n");
+      break;
+    case BenchResult::BenchErrorCode::parsing_error:
+      printf("MetaJson: Parsing returned %llu errors!\n", result.errors);
+      break;
+    case BenchResult::BenchErrorCode::unknown_file:
+      printf("MetaJson: Unknown file %s!\n", beg);
+      break;
+    case BenchResult::BenchErrorCode::ok:
+      break;
+    default:
+      printf("MetaJson: Unkown error code!\n");
+      break;
+    }
+    if (result.successful != BenchResult::BenchErrorCode::ok) {
+      break;
+    }
+    auto name = "MetaJson   ";
+    if (verbose)
+      printf("%-40s\t: ", name);
+    else
+      printf("\"%-40s\"", name);
+    fflush(NULL);
+    printf("%7.3f", gb / result.seconds);
+    if (verbose) {
+      printf(" GB/s ");
+    }
+    printf("%7.3f", repeat_gpu / result.seconds);
+    if (verbose) {
+      printf(" documents/s ");
+    }
+    printf("\n");
+  } while (false);
+  //END CUDA
+
 #ifndef ALLPARSER
   if (!just_data)
 #endif

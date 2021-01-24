@@ -56,6 +56,68 @@
     fflush(NULL);                                                              \
   } while (0)
 
+#define BEST_TIME_STREAM(name, ptr, expected, pre, njson, repeat, size, verbose)\
+  do {                                                                         \
+    if (verbose)                                                               \
+      printf("%-40s\t: ", name);                                               \
+    else                                                                       \
+      printf("\"%-40s\"", name);                                               \
+    fflush(NULL);                                                              \
+    event_collector collector;                                                 \
+    event_aggregate aggregate{};                                               \
+    simdjson::dom::parser __parser;                                            \
+    simdjson::dom::document_stream __stream;                                   \
+    bool __flag = true;                                                        \
+    for (decltype(repeat) i = 0; i < repeat; i++) {                            \
+      pre;                                                                     \
+      std::atomic_thread_fence(std::memory_order_acquire);                     \
+      collector.start();                                                       \
+      __parser.parse_many(ptr, (size_t)size, 1000000Ui64).get(__stream);       \
+      auto __it = __stream.begin();                                            \
+      const auto __end = __stream.end();                                       \
+      decltype(njson) x = 0;                                                   \
+	  for (; x < njson && __flag; ++__it, ++x) {                               \
+        auto doc = *__it;                                                      \
+        /*printf("Doc at %llu/%llu\n", __it.current_index(), size);*/          \
+        if (doc.error()) {                                                     \
+          __flag = false;                                                      \
+          break;                                                               \
+        }                                                                      \
+	  }                                                                        \
+	  if (!__flag || x != njson) {                                             \
+          fprintf(stderr, "error in batch barsing");                           \
+	      break;                                                               \
+	  }                                                                        \
+      std::atomic_thread_fence(std::memory_order_release);                     \
+      event_count allocate_count = collector.end();                            \
+      aggregate << allocate_count;                                             \
+    }                                                                          \
+    if (collector.has_events()) {                                              \
+      printf("%7.3f", aggregate.best.cycles() / static_cast<double>(size));    \
+      if (verbose) {                                                           \
+        printf(" cycles/byte ");                                               \
+      }                                                                        \
+      printf("\t");                                                            \
+      printf("%7.3f",                                                          \
+             aggregate.best.instructions() / static_cast<double>(size));       \
+      if (verbose) {                                                           \
+        printf(" instructions/byte ");                                         \
+      }                                                                        \
+      printf("\t");                                                            \
+    }                                                                          \
+    double gb = static_cast<double>(size) / 1000000000.0;                      \
+    printf("%7.3f", gb / aggregate.best.elapsed_sec());                        \
+    if (verbose) {                                                             \
+      printf(" GB/s ");                                                        \
+    }                                                                          \
+    printf("%7.3f", 1.0 / aggregate.best.elapsed_sec());                       \
+    if (verbose) {                                                             \
+      printf(" documents/s ");                                                 \
+    }                                                                          \
+    printf("\n");                                                              \
+    fflush(NULL);                                                              \
+  } while (0)
+
 // like BEST_TIME, but no check
 #define BEST_TIME_NOCHECK(name, test, pre, repeat, size, verbose)              \
   do {                                                                         \
